@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up MSVC developer command prompt
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Build (warnings as errors, static CRT)
+        run: cl /nologo /W4 /WX /EHsc /O2 /MT vcnwipe.cpp
+
+      - name: Smoke test (usage must exit with code 2)
+        shell: pwsh
+        run: |
+          & .\vcnwipe.exe 2>$null
+          "smoke-test exit code: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 2) { exit 1 }
+          # GHA fails pwsh steps on a nonzero $LASTEXITCODE even when the
+          # script itself succeeded, so reset it after the assertion.
+          $LASTEXITCODE = 0
+
+      - name: Compute SHA256
+        id: hash
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 .\vcnwipe.exe).Hash
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $notes = @"
+          Automated build of vcnwipe.exe (x64, MSVC /O2, /W4 /WX clean).
+
+          SHA256 (vcnwipe.exe): ${{ steps.hash.outputs.sha256 }}
+
+          See README for usage, exit codes and limitations (MFT-resident streams
+          unsupported; raw-LCN verification covers currently allocated clusters only).
+          "@
+          $releaseArgs = @('release', 'create', $tag, '--title', $tag, '--notes', $notes, './vcnwipe.exe')
+          if ($tag -like '*-*') { $releaseArgs += '--prerelease' }
+          gh @releaseArgs
